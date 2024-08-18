@@ -1,1 +1,6 @@
+#files
 *.exe
+
+#folders
+.vs/
+
