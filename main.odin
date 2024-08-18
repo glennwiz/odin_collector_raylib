@@ -10,7 +10,7 @@ SCREEN_HEIGHT :: 450
 SQUARE_SIZE   :: 5
 MOVE_SPEED    :: 2
 BASE_LASER_LENGTH :: 50
-FOOD_COUNT    :: 200
+FOOD_COUNT    :: 20
 INITIAL_FOOD_SIZE :: 5
 GROWTH_AMOUNT :: 0.1
 MOVE_DURATION :: 50
@@ -22,9 +22,16 @@ FOOD_PULL_SPEED :: 2
 FOOD_SHRINK_RATE :: 0.05
 MAX_ENERGY :: 100
 ENERGY_DECAY_RATE :: 0.1
-ENERGY_GAIN_FROM_FOOD :: 20
 MIN_CELL_SIZE :: 5
 MAX_CELL_SIZE :: 30
+
+FoodTier :: enum {
+    Low,
+    Medium_Low,
+    Medium,
+    Medium_High,
+    High,
+}
 
 FoodCell :: struct {
     position: rl.Vector2,
@@ -32,6 +39,7 @@ FoodCell :: struct {
     being_pulled: bool,
     target_collector: ^CollectorCell,
     size: f32,
+    tier: FoodTier,
 }
 
 CollectorCell :: struct {
@@ -44,6 +52,15 @@ CollectorCell :: struct {
     scan_timer: int,
     scan_angle: f32,
     energy: f32,
+    behavior_seed: int,
+}
+
+food_tier_properties := [FoodTier]struct{color: rl.Color, energy: f32, spawn_chance: f32}{
+    .Low         = {rl.WHITE, 10, 0.4},
+    .Medium_Low  = {rl.GREEN, 20, 0.3},
+    .Medium      = {rl.YELLOW, 30, 0.2},
+    .Medium_High = {rl.ORANGE, 40, 0.08},
+    .High        = {rl.PURPLE, 50, 0.02},
 }
 
 main :: proc() {
@@ -53,13 +70,7 @@ main :: proc() {
     // Initialize food cells
     food_cells := make([]FoodCell, FOOD_COUNT)
     for i in 0..<FOOD_COUNT {
-        food_cells[i] = FoodCell{
-            position = {f32(rand.int_max(SCREEN_WIDTH)), f32(rand.int_max(SCREEN_HEIGHT))},
-            active = true,
-            being_pulled = false,
-            target_collector = nil,
-            size = INITIAL_FOOD_SIZE,
-        }
+        food_cells[i] = create_random_food()
     }
 
     // Initialize collector cells
@@ -75,6 +86,7 @@ main :: proc() {
             scan_timer = 0,
             scan_angle = 0,
             energy = MAX_ENERGY,
+            behavior_seed = rand.int_max(1000),
         }
     }
 
@@ -106,7 +118,7 @@ main :: proc() {
         // Draw food cells on top
         for cell in food_cells {
             if cell.active {
-                rl.DrawCircleV(cell.position, cell.size, rl.RED)
+                rl.DrawCircleV(cell.position, cell.size, food_tier_properties[cell.tier].color)
             }
         }
         
@@ -116,6 +128,28 @@ main :: proc() {
     }
 
     rl.CloseWindow()
+}
+
+create_random_food :: proc() -> FoodCell {
+    roll := rand.float32_range(0, 1)
+    tier: FoodTier
+    cumulative_chance: f32 = 0
+    for t in FoodTier {
+        cumulative_chance += food_tier_properties[t].spawn_chance
+        if roll <= cumulative_chance {
+            tier = t
+            break
+        }
+    }
+
+    return FoodCell{
+        position = {f32(rand.int_max(SCREEN_WIDTH)), f32(rand.int_max(SCREEN_HEIGHT))},
+        active = true,
+        being_pulled = false,
+        target_collector = nil,
+        size = INITIAL_FOOD_SIZE,
+        tier = tier,
+    }
 }
 
 update_collector :: proc(collector: ^CollectorCell, all_collectors: []CollectorCell, food_cells: []FoodCell) {
@@ -134,7 +168,7 @@ update_collector :: proc(collector: ^CollectorCell, all_collectors: []CollectorC
                 // Choose new random direction
                 angle := rand.float32_range(0, 2 * math.PI)
                 collector.move_direction = {math.cos_f32(angle), math.sin_f32(angle)}
-                collector.move_direction *= MOVE_SPEED
+                collector.move_direction *= MOVE_SPEED * (1 + 0.2 * math.sin_f32(f32(collector.behavior_seed)))
             }
 
             // Avoid other collectors
@@ -161,18 +195,18 @@ update_collector :: proc(collector: ^CollectorCell, all_collectors: []CollectorC
             collector.center += collector.move_direction
             collector.move_timer += 1
 
-            if collector.move_timer >= MOVE_DURATION {
+            if collector.move_timer >= MOVE_DURATION + int(10 * math.sin_f32(f32(collector.behavior_seed))) {
                 collector.is_scanning = true
                 collector.scan_timer = 0
                 collector.scan_angle = -90
             }
         } else {
             collector.scan_timer += 1
-            collector.scan_angle += f32(SCAN_ANGLE) / f32(SCAN_DURATION)
+            collector.scan_angle += f32(SCAN_ANGLE) / (f32(SCAN_DURATION) * (1 + 0.2 * math.cos_f32(f32(collector.behavior_seed))))
 
             check_food_collision(collector, food_cells)
 
-            if collector.scan_timer >= SCAN_DURATION {
+            if collector.scan_timer >= SCAN_DURATION + int(10 * math.cos_f32(f32(collector.behavior_seed))) {
                 collector.is_scanning = false
                 collector.move_timer = 0
             }
@@ -253,7 +287,7 @@ update_food :: proc(food: ^FoodCell) {
              food.target_collector.size,
              food.target_collector.size}
         ) {
-            food.target_collector.energy += ENERGY_GAIN_FROM_FOOD
+            food.target_collector.energy += food_tier_properties[food.tier].energy
             if food.target_collector.energy > MAX_ENERGY {
                 food.target_collector.energy = MAX_ENERGY
             }
@@ -263,11 +297,8 @@ update_food :: proc(food: ^FoodCell) {
 }
 
 reset_food :: proc(food: ^FoodCell) {
-    food.active = true
-    food.being_pulled = false
-    food.target_collector = nil
-    food.position = {f32(rand.int_max(SCREEN_WIDTH)), f32(rand.int_max(SCREEN_HEIGHT))}
-    food.size = INITIAL_FOOD_SIZE
+    new_food := create_random_food()
+    food^ = new_food
 }
 
 draw_laser :: proc(collector: CollectorCell) {
