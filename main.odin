@@ -29,6 +29,11 @@ HAZARD_COUNT :: 3
 EVOLUTION_THRESHOLD :: 50  // Amount of energy needed to evolve
 MAX_CELLS :: 1000
 
+frame_count := 0
+last_cell_count := 0
+
+cells: [dynamic]Cell
+
 FoodTier :: enum {
     Low,
     Medium_Low,
@@ -90,19 +95,21 @@ main :: proc() {
     rl.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Enhanced Collector Cells Game")
     rl.SetTargetFPS(60)
 
+    // Initialize cells
+    cells = make([dynamic]Cell, 0, COLLECTOR_COUNT + PREDATOR_COUNT)
+    for i in 0..<COLLECTOR_COUNT {
+        append(&cells, create_cell(.Collector))
+        fmt.printf("Cells array length after spawn: %d\n", len(cells))
+    }
+    for i in 0..<PREDATOR_COUNT {
+        append(&cells, create_cell(.Predator))
+        fmt.printf("Cells array length after spawn: %d\n", len(cells))
+    }
+
     // Initialize food cells
     food_cells := make([]FoodCell, FOOD_COUNT)
     for i in 0..<FOOD_COUNT {
         food_cells[i] = create_random_food()
-    }
-
-    // Initialize cells (both collectors and predators)
-    cells := make([dynamic]Cell, COLLECTOR_COUNT + PREDATOR_COUNT)
-    for i in 0..<COLLECTOR_COUNT {
-        cells[i] = create_cell(.Collector)
-    }
-    for i in COLLECTOR_COUNT..<(COLLECTOR_COUNT + PREDATOR_COUNT) {
-        cells[i] = create_cell(.Predator)
     }
 
     // Initialize hazards
@@ -114,10 +121,15 @@ main :: proc() {
         }
     }
 
+    frame_count := 0
+    last_cell_count := len(cells)
+
     for !rl.WindowShouldClose() {
+        frame_count += 1
+
         // Update cells
         for i := 0; i < len(cells); i += 1 {
-            update_cell(&cells[i], &cells, food_cells[:], hazards[:])
+            update_cell(&cells[i], food_cells[:], hazards[:])
         }
 
         // Update food cells
@@ -178,8 +190,14 @@ main :: proc() {
             if cell.type == .Collector do collector_count += 1
             else do predator_count += 1
         }
-        debug_text := rl.TextFormat("Collectors: %d, Predators: %d", collector_count, predator_count)
+        debug_text := rl.TextFormat("Collectors: %d, Predators: %d, Total: %d", collector_count, predator_count, len(cells))
         rl.DrawText(debug_text, 10, 10, 20, rl.LIGHTGRAY)
+        
+        // Add debug information for cell count changes
+        if len(cells) != last_cell_count {
+            fmt.printf("Frame %d: Cell count changed from %d to %d\n", frame_count, last_cell_count, len(cells))
+            last_cell_count = len(cells)
+        }
         
         rl.EndDrawing()
     }
@@ -193,6 +211,7 @@ add_new_cell :: proc(cells: ^[dynamic]Cell, cell_type: CellType, position: rl.Ve
         new_cell := create_cell(cell_type)
         new_cell.center = position
         append(cells, new_cell)
+        fmt.printf("Cells array length after spawn: %d\n", len(cells))
     }
 }
 
@@ -235,7 +254,7 @@ create_random_food :: proc() -> FoodCell {
     }
 }
 
-update_cell :: proc(cell: ^Cell, all_cells: ^[dynamic]Cell, food_cells: []FoodCell, hazards: []Hazard) {
+update_cell :: proc(cell: ^Cell, food_cells: []FoodCell, hazards: []Hazard) {
     // Energy decay
     cell.energy -= ENERGY_DECAY_RATE * (cell.evolution_trait == .EfficientEnergy ? 0.5 : 1)
     if cell.energy < 0 {
@@ -262,7 +281,7 @@ update_cell :: proc(cell: ^Cell, all_cells: ^[dynamic]Cell, food_cells: []FoodCe
             }
 
             // Avoid other cells or chase them if predator
-            for &other in all_cells {
+            for &other in cells {
                 if &other != cell {
                     diff := cell.center - other.center
                     dist := rl.Vector2Length(diff)
@@ -308,15 +327,19 @@ update_cell :: proc(cell: ^Cell, all_cells: ^[dynamic]Cell, food_cells: []FoodCe
                 cell.is_scanning = false
                 cell.move_timer = 0
             }
-        }    
+        }
 
+        fmt.printf("Cell energy: %f\n", cell.energy)
         // Collector reproduction
-        if cell.type == .Collector && cell.energy >= 100 {
+        if cell.type == .Collector && cell.energy >= 99 {
             new_cell := create_cell(.Collector)
             new_cell.center = cell.center
             new_cell.energy = 30
+            new_cell.size = cell.size
             cell.energy = 70
-            append(all_cells, new_cell)
+            append(&cells, new_cell)
+            fmt.printf("Cells array length after spawn: %d\n", len(cells))
+            fmt.printf("---------------New collector spawned. Total cells: %d\n", len(cells))
         }
     }
 
@@ -342,29 +365,8 @@ update_cell :: proc(cell: ^Cell, all_cells: ^[dynamic]Cell, food_cells: []FoodCe
 
     // Predator eats collector and reproduces
     if cell.type == .Predator {
-        for i := 0; i < len(all_cells); i += 1 {
-            other := &all_cells[i]
-            if other.type == .Collector && rl.CheckCollisionCircles(cell.center, cell.size/2, other.center, other.size/2) {
-                cell.energy += other.energy * 0.5
-                if cell.energy > MAX_ENERGY do cell.energy = MAX_ENERGY
-                
-                // Spawn two new predators
-                add_new_cell(all_cells, .Predator, cell.center)
-                add_new_cell(all_cells, .Predator, cell.center)
-                
-                // Remove the eaten collector
-                ordered_remove(all_cells, i)
-                i -= 1 // Adjust index after removal
-                
-                break // Only eat one collector per update
-            }
-        }
-    }
-
-    // Predator eats collector and reproduces
-    if cell.type == .Predator {
-        for i := 0; i < len(all_cells); i += 1 {
-            other := &all_cells[i]
+        for i := 0; i < len(cells); i += 1 {
+            other := &cells[i]
             if other.type == .Collector && rl.CheckCollisionCircles(cell.center, cell.size/2, other.center, other.size/2) {
                 cell.energy += other.energy * 0.5
                 if cell.energy > MAX_ENERGY do cell.energy = MAX_ENERGY
@@ -372,21 +374,24 @@ update_cell :: proc(cell: ^Cell, all_cells: ^[dynamic]Cell, food_cells: []FoodCe
                 // Spawn two new predators
                 new_predator1 := create_cell(.Predator)
                 new_predator1.center = cell.center
-                new_predator1.energy = cell.energy / 3
+                new_predator1.size = cell.size
+                new_predator1.energy = 100
                 
                 new_predator2 := create_cell(.Predator)
                 new_predator2.center = cell.center
-                new_predator2.energy = cell.energy / 3
+                new_predator2.size = cell.size
+                new_predator2.energy =1000
                 
                 cell.energy /= 3  // Divide energy among parent and two offspring
                 
-                append(all_cells, new_predator1)
-                append(all_cells, new_predator2)
+                append(&cells, new_predator1)
+                fmt.printf("Cells array length after spawn: %d\n", len(cells))
+                append(&cells, new_predator2)
+                fmt.printf("Cells array length after spawn: %d\n", len(cells))
                 
                 // Remove the eaten collector
-                ordered_remove(all_cells, i)
-                i -= 1 // Adjust index after removal
-                
+                ordered_remove(&cells, i)
+                fmt.printf("Collector eaten. Two new predators spawned. Total cells: %d\n", len(cells))
                 break // Only eat one collector per update
             }
         }
