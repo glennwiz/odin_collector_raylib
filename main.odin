@@ -10,16 +10,17 @@ import rl "vendor:raylib"
 SCREEN_WIDTH  :: 800
 SCREEN_HEIGHT :: 450
 SQUARE_SIZE   :: 5
-MOVE_SPEED    :: 2
+MOVE_SPEED    :: 1
 BASE_LASER_LENGTH :: 50
 FOOD_COUNT    :: 30
 INITIAL_FOOD_SIZE :: 5
-GROWTH_AMOUNT :: 0.1
-MOVE_DURATION :: 50
+GROWTH_AMOUNT :: 0.15
+MOVE_DURATION :: 40
 SCAN_DURATION :: 60
 SCAN_ANGLE    :: 180
 COLLECTOR_COUNT :: 6
 PREDATOR_COUNT :: 6
+PREDATOR_ENERGY_DECAY_RATE :: 0.02  // Half the rate of collectors
 AVOIDANCE_DISTANCE :: 50
 FOOD_PULL_SPEED :: 2
 FOOD_SHRINK_RATE :: 0.05
@@ -31,6 +32,7 @@ HAZARD_COUNT :: 3
 EVOLUTION_THRESHOLD :: 50
 MAX_CELLS :: 1000
 GOLDEN_FOOD_SPAWN_INTERVAL :: 100
+
 
 DEBUG_MODE :: #config(DEBUG, false) // run with  -  -  odin run . -define:DEBUG=true
 DEBUG_FPS :: 10
@@ -235,6 +237,25 @@ draw_hazards :: proc() {
     }
 }
 
+draw_cell :: proc(cell: Cell) {
+    position := cell.center - {cell.size/2, cell.size/2}
+    color: rl.Color
+    if cell.type == .Collector {
+        color = rl.ColorAlpha(rl.WHITE, cell.energy / MAX_ENERGY)
+    } else {
+        color = rl.ColorAlpha(rl.RED, cell.energy / MAX_ENERGY)
+    }
+    
+    rl.DrawRectangleV(position, {cell.size, cell.size}, color)
+    
+    if cell.is_scanning && cell.type == .Collector {
+        draw_laser(cell, cell.center)
+    }
+    
+    draw_evolution_trait(cell, cell.center)
+    draw_energy_counter(cell, cell.center)
+}
+
 draw_cells :: proc() {
     for cell in cells {
         draw_cell(cell)
@@ -252,28 +273,10 @@ draw_debug_overlay :: proc() {
     }
 }
 
-draw_cell :: proc(cell: Cell) {
-    position := cell.center - {cell.size/2, cell.size/2}
-    color: rl.Color
-    if cell.type == .Collector {
-        color = rl.ColorAlpha(rl.WHITE, cell.energy / MAX_ENERGY)
-    } else {
-        color = rl.ColorAlpha(rl.RED, cell.energy / MAX_ENERGY)
-    }
-    
-    rl.DrawRectangleV(position, {cell.size, cell.size}, color)
-    
-    if cell.is_scanning && cell.type == .Collector {
-        draw_laser(cell)
-    }
-    
-    draw_evolution_trait(cell)
-    draw_energy_counter(cell)
-}
 
-draw_evolution_trait :: proc(cell: Cell) {
+draw_evolution_trait :: proc(cell: Cell, center: rl.Vector2) {
     trait_color := get_trait_color(cell.evolution_trait)
-    rl.DrawCircleV(cell.center + {cell.size/4, cell.size/4}, cell.size/8, trait_color)
+    rl.DrawCircleV(center + {cell.size/4, cell.size/4}, cell.size/8, trait_color)
 }
 
 get_trait_color :: proc(trait: EvolutionTrait) -> rl.Color {
@@ -285,10 +288,10 @@ get_trait_color :: proc(trait: EvolutionTrait) -> rl.Color {
     }
 }
 
-draw_energy_counter :: proc(cell: Cell) {
+draw_energy_counter :: proc(cell: Cell, center: rl.Vector2) {
     energy_text := rl.TextFormat("%d", int(cell.energy))
     text_size := 10
-    position := cell.center - {cell.size/2, cell.size/2}
+    position := center - {cell.size/2, cell.size/2}
     text_position := position + {cell.size - f32(rl.MeasureText(energy_text, i32(text_size))), 0}
     rl.DrawText(energy_text, i32(text_position.x), i32(text_position.y), i32(text_size), rl.BLACK)
 }
@@ -412,7 +415,16 @@ create_random_food :: proc() -> FoodCell {
 
 update_cell :: proc(cell: ^Cell) {
     // Energy decay
-    cell.energy -= ENERGY_DECAY_RATE * (cell.evolution_trait == .EfficientEnergy ? 0.5 : 1)
+    decay_rate := ENERGY_DECAY_RATE
+    if cell.type == .Predator {
+        decay_rate = PREDATOR_ENERGY_DECAY_RATE
+    }
+    
+    if cell.evolution_trait == .EfficientEnergy {
+        decay_rate *= 0.5
+    }
+    
+    cell.energy -= f32(decay_rate)
     if cell.energy < 0 {
         cell.energy = 0
         return  // Cell will be removed in the update_game procedure
@@ -446,10 +458,7 @@ update_cell :: proc(cell: ^Cell) {
 
     // Gradual size adjustment
     adjust_cell_size(cell)
-
-    // Keep the cell within the screen bounds
-    constrain_cell_to_screen(cell)
-
+   
     // Check collision with hazards
     check_hazard_collisions(cell)
 
@@ -471,6 +480,13 @@ update_cell_movement :: proc(cell: ^Cell, move_speed: f32) {
     for &other in cells {
         if &other != cell {
             diff := cell.center - other.center
+            // Adjust diff for wrap-around
+            if abs(diff.x) > SCREEN_WIDTH / 2 {
+                diff.x = -sign(diff.x) * (SCREEN_WIDTH - abs(diff.x))
+            }
+            if abs(diff.y) > SCREEN_HEIGHT / 2 {
+                diff.y = -sign(diff.y) * (SCREEN_HEIGHT - abs(diff.y))
+            }
             dist := rl.Vector2Length(diff)
             if dist < AVOIDANCE_DISTANCE {
                 if cell.type == .Predator && other.type == .Collector {
@@ -490,11 +506,19 @@ update_cell_movement :: proc(cell: ^Cell, move_speed: f32) {
         nearest_food := find_nearest_food(cell)
         if nearest_food != nil {
             direction := nearest_food.position - cell.center
+            // Adjust direction for wrap-around
+            if abs(direction.x) > SCREEN_WIDTH / 2 {
+                direction.x = -sign(direction.x) * (SCREEN_WIDTH - abs(direction.x))
+            }
+            if abs(direction.y) > SCREEN_HEIGHT / 2 {
+                direction.y = -sign(direction.y) * (SCREEN_HEIGHT - abs(direction.y))
+            }
             cell.move_direction = direction * move_speed / rl.Vector2Length(direction)
         }
     }
 
     cell.center += cell.move_direction
+    cell.center = wrap_position(cell.center)
     cell.move_timer += 1
 
     if cell.move_timer >= MOVE_DURATION + int(10 * math.sin_f32(f32(cell.behavior_seed))) {
@@ -502,6 +526,23 @@ update_cell_movement :: proc(cell: ^Cell, move_speed: f32) {
         cell.scan_timer = 0
         cell.scan_angle = -90
     }
+}
+
+wrap_position :: proc(position: rl.Vector2) -> rl.Vector2 {
+    wrapped := position
+    if wrapped.x < 0 {
+        wrapped.x += f32(SCREEN_WIDTH)
+    } else if wrapped.x >= f32(SCREEN_WIDTH) {
+        wrapped.x -= f32(SCREEN_WIDTH)
+    }
+    
+    if wrapped.y < 0 {
+        wrapped.y += f32(SCREEN_HEIGHT)
+    } else if wrapped.y >= f32(SCREEN_HEIGHT) {
+        wrapped.y -= f32(SCREEN_HEIGHT)
+    }
+    
+    return wrapped
 }
 
 update_cell_scanning :: proc(cell: ^Cell) {
@@ -586,11 +627,6 @@ adjust_cell_size :: proc(cell: ^Cell) {
     cell.size = clamp(cell.size, MIN_CELL_SIZE, MAX_CELL_SIZE)
 }
 
-constrain_cell_to_screen :: proc(cell: ^Cell) {
-    cell.center.x = clamp(cell.center.x, cell.size/2, f32(SCREEN_WIDTH) - cell.size/2)
-    cell.center.y = clamp(cell.center.y, cell.size/2, f32(SCREEN_HEIGHT) - cell.size/2)
-}
-
 check_hazard_collisions :: proc(cell: ^Cell) {
     for hazard in hazards {
         if rl.CheckCollisionCircles(cell.center, cell.size/2, hazard.position, hazard.radius) {
@@ -601,32 +637,33 @@ check_hazard_collisions :: proc(cell: ^Cell) {
 }
 
 handle_predator_eating :: proc(cell: ^Cell) {
-    for i := 0; i < len(cells); i += 1 {
+    for i := 0; i < len(cells); {
         other := &cells[i]
         if other.type == .Collector && rl.CheckCollisionCircles(cell.center, cell.size/2, other.center, other.size/2) {
-            cell.energy += other.energy * 0.5
+            energy_gained := other.energy * 0.75  
+            cell.energy += energy_gained
             if cell.energy > MAX_ENERGY do cell.energy = MAX_ENERGY
-            
-            // Spawn two new predators
-            new_predator1 := create_cell(.Predator)
-            new_predator1.center = cell.center
-            new_predator1.size = cell.size
-            new_predator1.energy = 100
-            
-            new_predator2 := create_cell(.Predator)
-            new_predator2.center = cell.center
-            new_predator2.size = cell.size
-            new_predator2.energy = 100
-            
-            cell.energy /= 3  // Divide energy among parent and two offspring
-            
-            append(&cells, new_predator1)
-            append(&cells, new_predator2)
             
             // Remove the eaten collector
             ordered_remove(&cells, i)
-            fmt.printf("Collector eaten. Two new predators spawned. Total cells: %d\n", len(cells))
+            
+            // Spawn a new predator only if energy is high enough
+            if cell.energy > MAX_ENERGY * 0.75 {
+                new_predator := create_cell(.Predator)
+                new_predator.center = cell.center
+                new_predator.size = cell.size
+                new_predator.energy = 100  
+                
+                cell.energy *= 1.25 //boost energy  
+                
+                append(&cells, new_predator)
+                fmt.printf("Collector eaten. New predator spawned. Total cells: %d\n", len(cells))
+            } else {
+                fmt.printf("Collector eaten. Predator energy increased. Total cells: %d\n", len(cells))
+            }
             break // Only eat one collector per update
+        } else {
+            i += 1
         }
     }
 }
@@ -642,7 +679,15 @@ find_nearest_food :: proc(cell: ^Cell) -> ^FoodCell {
 
     for &food in food_cells {
         if food.active {
-            distance := rl.Vector2Distance(cell.center, food.position)
+            diff := food.position - cell.center
+            // Adjust diff for wrap-around
+            if abs(diff.x) > SCREEN_WIDTH / 2 {
+                diff.x = -sign(diff.x) * (SCREEN_WIDTH - abs(diff.x))
+            }
+            if abs(diff.y) > SCREEN_HEIGHT / 2 {
+                diff.y = -sign(diff.y) * (SCREEN_HEIGHT - abs(diff.y))
+            }
+            distance := rl.Vector2Length(diff)
             if distance < min_distance {
                 min_distance = distance
                 nearest_food = &food
@@ -683,16 +728,16 @@ reset_food :: proc(food: ^FoodCell) {
     food^ = new_food
 }
 
-draw_laser :: proc(cell: Cell) {
+draw_laser :: proc(cell: Cell, center: rl.Vector2) {
     base_direction := rl.Vector2{1, 0}
     scan_direction := rl.Vector2Rotate(base_direction, math.to_radians_f32(cell.scan_angle))
     move_angle := math.atan2_f32(cell.move_direction.y, cell.move_direction.x)
     final_direction := rl.Vector2Rotate(scan_direction, move_angle)
     laser_length := BASE_LASER_LENGTH * math.pow(cell.size / SQUARE_SIZE, 0.5) * (cell.evolution_trait == .LongLaser ? 1.5 : 1)
-    laser_end := cell.center + final_direction * laser_length
+    laser_end := center + final_direction * laser_length
     laser_color := rl.ColorAlpha(rl.SKYBLUE, cell.energy / MAX_ENERGY)
     rl.DrawLineEx(
-        cell.center,
+        center,
         laser_end,
         2,
         laser_color,
@@ -714,9 +759,15 @@ cleanup :: proc() {
 }
 
 
-// Helper function to clamp a value between a minimum and maximum
+// Helper functions
 clamp :: proc(value, min, max: f32) -> f32 {
     if value < min do return min
     if value > max do return max
     return value
+}
+
+sign :: proc(x: f32) -> f32 {
+    if x < 0 do return -1
+    if x > 0 do return 1
+    return 0
 }
