@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:math/rand"
 import "core:math"
+import "core:time"
 import rl "vendor:raylib"
 
 // Constants
@@ -29,6 +30,9 @@ MAX_CELL_SIZE :: 30
 HAZARD_COUNT :: 3
 EVOLUTION_THRESHOLD :: 50
 MAX_CELLS :: 1000
+
+DEBUG_MODE :: #config(DEBUG, false) // run with  -  -  odin run . -define:DEBUG=true
+DEBUG_FPS :: 10
 
 // Enums and Structs
 FoodTier :: enum {
@@ -86,6 +90,7 @@ food_cells: [FOOD_COUNT]FoodCell
 hazards: [HAZARD_COUNT]Hazard
 frame_count: int
 last_cell_count: int
+debug_info: [dynamic]string
 
 food_tier_properties := [FoodTier]struct{color: rl.Color, energy: f32, spawn_chance: f32}{
     .Low         = {rl.WHITE, 10, 0.4},
@@ -100,9 +105,22 @@ main :: proc() {
     defer cleanup()
 
     for !rl.WindowShouldClose() {
+        if DEBUG_MODE {
+            time.sleep(time.Second / DEBUG_FPS)
+        }
         update_game()
         draw_game()
+        if DEBUG_MODE {
+            process_debug_info()
+        }
     }
+}
+
+process_debug_info :: proc() {
+    for info in debug_info {
+        fmt.println(info)
+    }
+    clear(&debug_info)
 }
 
 initialize_game :: proc() {
@@ -142,11 +160,6 @@ initialize_hazards :: proc() {
     }
 }
 
-cleanup :: proc() {
-    delete(cells)
-    rl.CloseWindow()
-}
-
 update_game :: proc() {
     frame_count += 1
 
@@ -159,6 +172,21 @@ update_game :: proc() {
     }
 
     check_cell_count_change()
+
+    if DEBUG_MODE {
+        collect_debug_info()
+    }
+}
+
+collect_debug_info :: proc() {
+    append(&debug_info, fmt.tprintf("Frame: %d", frame_count))
+    append(&debug_info, fmt.tprintf("Total Cells: %d", len(cells)))
+    append(&debug_info, fmt.tprintf("Total Food: %d", FOOD_COUNT))
+    
+    collector_count, predator_count := count_cell_types()
+    append(&debug_info, fmt.tprintf("Collectors: %d, Predators: %d", collector_count, predator_count))
+    
+    // Add more debug info as needed
 }
 
 draw_game :: proc() {
@@ -171,6 +199,10 @@ draw_game :: proc() {
     draw_cells()
     draw_food()
     draw_debug_info()
+
+    if DEBUG_MODE {
+        draw_debug_overlay()
+    }
 }
 
 draw_hazards :: proc() {
@@ -182,6 +214,17 @@ draw_hazards :: proc() {
 draw_cells :: proc() {
     for cell in cells {
         draw_cell(cell)
+    }
+}
+
+draw_debug_overlay :: proc() {
+    debug_text_size :: 15
+    line_spacing :: 5
+    start_y := 40  // Start below the existing debug info
+
+    for info, i in debug_info {
+        y_pos := start_y + i * (debug_text_size + line_spacing)
+        rl.DrawText(cstring(raw_data(info)), 10, i32(y_pos), debug_text_size, rl.WHITE)
     }
 }
 
@@ -320,6 +363,11 @@ update_cell :: proc(cell: ^Cell) {
         }
 
         handle_cell_reproduction(cell)
+    }
+
+    if DEBUG_MODE {
+        append(&debug_info, fmt.tprintf("Cell %d: Type=%v, Energy=%.2f, Position=(%.2f, %.2f)", 
+                                        cell_index(cell), cell.type, cell.energy, cell.center.x, cell.center.y))
     }
 
     // Gradual size adjustment
@@ -520,6 +568,11 @@ update_food :: proc(food: ^FoodCell) {
             food.size = 0.5  // Minimum size to keep it visible
         }
 
+        if DEBUG_MODE && food.being_pulled {
+            append(&debug_info, fmt.tprintf("Food being pulled: Tier=%v, Size=%.2f, Position=(%.2f, %.2f)", 
+                                            food.tier, food.size, food.position.x, food.position.y))
+        }
+
         if rl.CheckCollisionCircleRec(
             food.position,
             food.size,
@@ -556,6 +609,19 @@ draw_laser :: proc(cell: Cell) {
         2,
         laser_color,
     )
+}
+
+cell_index :: proc(cell: ^Cell) -> int {
+    for &c, i in cells {
+        if &c == cell do return i
+    }
+    return -1
+}
+
+cleanup :: proc() {
+    delete(cells)
+    delete(debug_info)
+    rl.CloseWindow()
 }
 
 // Helper function to clamp a value between a minimum and maximum
