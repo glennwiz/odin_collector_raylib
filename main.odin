@@ -12,7 +12,7 @@ SCREEN_HEIGHT :: 450
 SQUARE_SIZE   :: 5
 MOVE_SPEED    :: 2
 BASE_LASER_LENGTH :: 50
-FOOD_COUNT    :: 200
+FOOD_COUNT    :: 30
 INITIAL_FOOD_SIZE :: 5
 GROWTH_AMOUNT :: 0.1
 MOVE_DURATION :: 50
@@ -30,6 +30,7 @@ MAX_CELL_SIZE :: 30
 HAZARD_COUNT :: 3
 EVOLUTION_THRESHOLD :: 50
 MAX_CELLS :: 1000
+GOLDEN_FOOD_SPAWN_INTERVAL :: 100
 
 DEBUG_MODE :: #config(DEBUG, false) // run with  -  -  odin run . -define:DEBUG=true
 DEBUG_FPS :: 10
@@ -40,7 +41,8 @@ FoodTier :: enum {
     Medium_Low,
     Medium,
     Medium_High,
-    High,
+    High,    
+    Golden,
 }
 
 CellType :: enum {
@@ -62,6 +64,7 @@ FoodCell :: struct {
     target_collector: ^Cell,
     size: f32,
     tier: FoodTier,
+    is_golden: bool,
 }
 
 Cell :: struct {
@@ -86,7 +89,7 @@ Hazard :: struct {
 
 // Global variables
 cells: [dynamic]Cell
-food_cells: [FOOD_COUNT]FoodCell
+food_cells: [dynamic]FoodCell
 hazards: [HAZARD_COUNT]Hazard
 frame_count: int
 last_cell_count: int
@@ -98,6 +101,7 @@ food_tier_properties := [FoodTier]struct{color: rl.Color, energy: f32, spawn_cha
     .Medium      = {rl.YELLOW, 30, 0.2},
     .Medium_High = {rl.ORANGE, 40, 0.08},
     .High        = {rl.PURPLE, 50, 0.02},
+    .Golden      = {rl.GOLD, 200, 0.005},
 }
 
 main :: proc() {
@@ -128,6 +132,7 @@ initialize_game :: proc() {
     rl.SetTargetFPS(60)
 
     cells = make([dynamic]Cell, 0, COLLECTOR_COUNT + PREDATOR_COUNT)
+    food_cells = make([dynamic]FoodCell, FOOD_COUNT)
     initialize_cells()
     initialize_food_cells()
     initialize_hazards()
@@ -147,7 +152,7 @@ initialize_cells :: proc() {
 
 initialize_food_cells :: proc() {
     for i in 0..<FOOD_COUNT {
-        food_cells[i] = create_random_food()
+        append(&food_cells, create_random_food())
     }
 }
 
@@ -163,12 +168,31 @@ initialize_hazards :: proc() {
 update_game :: proc() {
     frame_count += 1
 
-    for i := 0; i < len(cells); i += 1 {
-        update_cell(&cells[i])
+    for i := 0; i < len(cells); {
+        if cells[i].energy <= 0 {
+            ordered_remove(&cells, i)
+        } else {
+            update_cell(&cells[i])
+            i += 1
+        }
     }
 
-    for i in 0..<FOOD_COUNT {
+    // Update all food cells, including any extra golden food
+    for i := 0; i < len(food_cells); i += 1 {
         update_food(&food_cells[i])
+    }
+
+    if frame_count % GOLDEN_FOOD_SPAWN_INTERVAL == 0 {
+        spawn_golden_food()
+    }
+
+    // Remove any extra non-golden inactive food
+    for i := FOOD_COUNT; i < len(food_cells); {
+        if !food_cells[i].active && !food_cells[i].is_golden {
+            ordered_remove(&food_cells, i)
+        } else {
+            i += 1
+        }
     }
 
     check_cell_count_change()
@@ -270,17 +294,64 @@ draw_energy_counter :: proc(cell: Cell) {
 }
 
 draw_food :: proc() {
-    for cell in food_cells {
-        if cell.active {
-            rl.DrawCircleV(cell.position, cell.size, food_tier_properties[cell.tier].color)
+    for food in food_cells {
+        if food.active {
+            rl.DrawCircleV(food.position, food.size, food_tier_properties[food.tier].color)
+            if food.tier == .Golden {
+                draw_star(food.position, food.size * 1.5, rl.GOLD)
+            }
         }
     }
+}
+
+spawn_golden_food :: proc() {
+    // First, try to replace an existing inactive food
+    for &food in food_cells {
+        if !food.active {
+            food = create_random_food()
+            food.tier = .Golden
+            food.size = INITIAL_FOOD_SIZE * 1.5
+            food.is_golden = true
+            return
+        }
+    }
+    
+    // If all food cells are active, create a new one
+    new_golden_food := FoodCell{
+        position = {f32(rand.int31_max(SCREEN_WIDTH)), f32(rand.int31_max(SCREEN_HEIGHT))},
+        active = true,
+        being_pulled = false,
+        target_collector = nil,
+        size = INITIAL_FOOD_SIZE * 1.5,
+        tier = .Golden,
+        is_golden = true,
+    }
+    append(&food_cells, new_golden_food)
 }
 
 draw_debug_info :: proc() {
     collector_count, predator_count := count_cell_types()
     debug_text := rl.TextFormat("Collectors: %d, Predators: %d, Total: %d", collector_count, predator_count, len(cells))
     rl.DrawText(debug_text, 10, 10, 20, rl.LIGHTGRAY)
+}
+
+draw_star :: proc(center: rl.Vector2, size: f32, color: rl.Color) {
+    points := 5
+    outer_radius := size
+    inner_radius := size * 0.5
+    rotation := f32(frame_count) * 0.05  // Rotate the star slowly
+
+    for i in 0..<points*2 {
+        angle := rotation + f32(i) * math.PI / f32(points)
+        radius := outer_radius if i % 2 == 0 else inner_radius
+        x := center.x + math.cos_f32(angle) * radius
+        y := center.y + math.sin_f32(angle) * radius
+        next_angle := rotation + f32(i+1) * math.PI / f32(points)
+        next_radius := inner_radius if i % 2 == 0 else outer_radius
+        next_x := center.x + math.cos_f32(next_angle) * next_radius
+        next_y := center.y + math.sin_f32(next_angle) * next_radius
+        rl.DrawLineEx({x, y}, {next_x, next_y}, 2, color)
+    }
 }
 
 count_cell_types :: proc() -> (int, int) {
@@ -335,6 +406,7 @@ create_random_food :: proc() -> FoodCell {
         target_collector = nil,
         size = INITIAL_FOOD_SIZE,
         tier = tier,
+        is_golden = false, 
     }
 }
 
@@ -343,7 +415,9 @@ update_cell :: proc(cell: ^Cell) {
     cell.energy -= ENERGY_DECAY_RATE * (cell.evolution_trait == .EfficientEnergy ? 0.5 : 1)
     if cell.energy < 0 {
         cell.energy = 0
+        return  // Cell will be removed in the update_game procedure
     }
+
 
     // Check for evolution
     if cell.energy >= EVOLUTION_THRESHOLD && cell.evolution_trait == .None {
@@ -441,6 +515,53 @@ update_cell_scanning :: proc(cell: ^Cell) {
     if cell.scan_timer >= SCAN_DURATION + int(10 * math.cos_f32(f32(cell.behavior_seed))) {
         cell.is_scanning = false
         cell.move_timer = 0
+    }
+}
+
+update_food :: proc(food: ^FoodCell) {
+    if food.being_pulled && food.target_collector != nil {
+        direction := food.target_collector.center - food.position
+        direction = rl.Vector2Normalize(direction)
+        food.position += direction * FOOD_PULL_SPEED
+
+        // Shrink the food as it's being pulled
+        food.size -= FOOD_SHRINK_RATE
+        if food.size < 0.5 {
+            food.size = 0.5  // Minimum size to keep it visible
+        }
+
+        if DEBUG_MODE && food.being_pulled {
+            append(&debug_info, fmt.tprintf("Food being pulled: Tier=%v, Size=%.2f, Position=(%.2f, %.2f)", 
+                                            food.tier, food.size, food.position.x, food.position.y))
+        }
+
+        if rl.CheckCollisionCircleRec(
+            food.position,
+            food.size,
+            {food.target_collector.center.x - food.target_collector.size/2,
+                food.target_collector.center.y - food.target_collector.size/2,
+                food.target_collector.size,
+                food.target_collector.size}
+        ) {
+            energy_gain: f32
+            if food.tier == .Golden {
+                energy_gain = 200  // Golden food gives 200 energy
+                food.target_collector.evolution_trait = EvolutionTrait(rand.int31_max(len(EvolutionTrait) - 1) + 1)
+            } else {
+                energy_gain = food_tier_properties[food.tier].energy
+            }
+            
+            food.target_collector.energy += energy_gain
+            if food.target_collector.energy > MAX_ENERGY {
+                food.target_collector.energy = MAX_ENERGY
+            }
+            
+            if DEBUG_MODE {
+                append(&debug_info, fmt.tprintf("Cell gained %.0f energy from %v food", energy_gain, food.tier))
+            }
+            
+            reset_food(food)
+        }
     }
 }
 
@@ -556,39 +677,6 @@ check_food_collision :: proc(cell: ^Cell) {
     }
 }
 
-update_food :: proc(food: ^FoodCell) {
-    if food.being_pulled && food.target_collector != nil {
-        direction := food.target_collector.center - food.position
-        direction = rl.Vector2Normalize(direction)
-        food.position += direction * FOOD_PULL_SPEED
-
-        // Shrink the food as it's being pulled
-        food.size -= FOOD_SHRINK_RATE
-        if food.size < 0.5 {
-            food.size = 0.5  // Minimum size to keep it visible
-        }
-
-        if DEBUG_MODE && food.being_pulled {
-            append(&debug_info, fmt.tprintf("Food being pulled: Tier=%v, Size=%.2f, Position=(%.2f, %.2f)", 
-                                            food.tier, food.size, food.position.x, food.position.y))
-        }
-
-        if rl.CheckCollisionCircleRec(
-            food.position,
-            food.size,
-            {food.target_collector.center.x - food.target_collector.size/2,
-                food.target_collector.center.y - food.target_collector.size/2,
-                food.target_collector.size,
-                food.target_collector.size}
-        ) {
-            food.target_collector.energy += food_tier_properties[food.tier].energy
-            if food.target_collector.energy > MAX_ENERGY {
-                food.target_collector.energy = MAX_ENERGY
-            }
-            reset_food(food)
-        }
-    }
-}
 
 reset_food :: proc(food: ^FoodCell) {
     new_food := create_random_food()
@@ -620,9 +708,11 @@ cell_index :: proc(cell: ^Cell) -> int {
 
 cleanup :: proc() {
     delete(cells)
+    delete(food_cells)
     delete(debug_info)
     rl.CloseWindow()
 }
+
 
 // Helper function to clamp a value between a minimum and maximum
 clamp :: proc(value, min, max: f32) -> f32 {
