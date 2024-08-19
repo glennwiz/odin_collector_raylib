@@ -19,9 +19,9 @@ GROWTH_AMOUNT :: 0.15
 MOVE_DURATION :: 40
 SCAN_DURATION :: 60
 SCAN_ANGLE    :: 180
-COLLECTOR_COUNT :: 60
+COLLECTOR_COUNT :: 10
 PREDATOR_COUNT :: 3
-PREDATOR_ENERGY_DECAY_RATE :: 0.02  // Half the rate of collectors
+PREDATOR_ENERGY_DECAY_RATE :: 0.02 
 AVOIDANCE_DISTANCE :: 50
 FOOD_PULL_SPEED :: 2
 FOOD_SHRINK_RATE :: 0.05
@@ -37,7 +37,7 @@ INITIAL_PREDATOR_ENERGY :: 80
 PING_INTERVAL :: 2.0  // seconds
 PING_SPEED :: 3.0
 MAX_PING_RADIUS :: 100.0
-PING_COOLDOWN :: 1.0  // seconds
+PING_COOLDOWN :: 0.1  // seconds
 
 // Constants for hook behavior
 HOOK_SPEED :: 2.0
@@ -197,6 +197,8 @@ update_game :: proc() {
             i += 1
         }
     }
+
+    adjust_overlapping_cells()
 
     // Update all food cells, including any extra golden food
     for i := 0; i < len(food_cells); i += 1 {
@@ -416,17 +418,24 @@ check_cell_count_change :: proc() {
 
 create_cell :: proc(type: CellType) -> Cell {
     energy := type == .Predator ? INITIAL_PREDATOR_ENERGY : MAX_ENERGY
+    
+    // Add some randomness to the initial position
+    initial_position := rl.Vector2{
+        f32(rand.int31_max(SCREEN_WIDTH)),
+        f32(rand.int31_max(SCREEN_HEIGHT)),
+    }
+    
     return Cell{
         type = type,
-        center = {f32(rand.int31_max(SCREEN_WIDTH)), f32(rand.int31_max(SCREEN_HEIGHT))},
+        center = initial_position,
         size = f32(SQUARE_SIZE),
-        target_size = f32(SQUARE_SIZE),
+        target_size = SQUARE_SIZE,
         move_direction = {0, 0},
         move_timer = 0,
         is_scanning = false,
         scan_timer = 0,
         scan_angle = 0,
-        energy = MAX_ENERGY,
+        energy = f32(energy),
         behavior_seed = int(rand.int31()),
         evolution_trait = .None,
         is_hooking = false,
@@ -437,6 +446,27 @@ create_cell :: proc(type: CellType) -> Cell {
         is_pinging = false,
         ping_radius = 0,
         ping_cooldown = 0,
+    }
+}
+
+adjust_overlapping_cells :: proc() {
+    for i := 0; i < len(cells); i += 1 {
+        for j := i + 1; j < len(cells); j += 1 {
+            cell1 := &cells[i]
+            cell2 := &cells[j]
+            
+            diff := cell1.center - cell2.center
+            distance := rl.Vector2Length(diff)
+            
+            if distance < cell1.size / 2 + cell2.size / 2 {
+                // Cells are overlapping, move them apart
+                overlap := (cell1.size / 2 + cell2.size / 2 - distance) / 2
+                movement := rl.Vector2Scale(rl.Vector2Normalize(diff), overlap)
+                
+                cell1.center = wrap_position(cell1.center + movement)
+                cell2.center = wrap_position(cell2.center - movement)
+            }
+        }
     }
 }
 
@@ -806,7 +836,14 @@ handle_predator_eating :: proc(cell: ^Cell) {
             // Spawn a new predator only if energy is high enough
             if cell.energy > MAX_ENERGY * 0.75 {
                 new_predator := create_cell(.Predator)
-                new_predator.center = cell.center
+                
+                // Add a random offset to the new predator's position
+                offset := rl.Vector2{
+                    rand.float32_range(-cell.size, cell.size),
+                    rand.float32_range(-cell.size, cell.size),
+                }
+                new_predator.center = wrap_position(cell.center + offset)
+                
                 new_predator.size = cell.size
                 new_predator.energy = 100  
 
