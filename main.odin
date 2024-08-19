@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:math/rand"
+import "core:math/linalg"
 import "core:math"
 import "core:time"
 import rl "vendor:raylib"
@@ -18,8 +19,8 @@ GROWTH_AMOUNT :: 0.15
 MOVE_DURATION :: 40
 SCAN_DURATION :: 60
 SCAN_ANGLE    :: 180
-COLLECTOR_COUNT :: 6
-PREDATOR_COUNT :: 6
+COLLECTOR_COUNT :: 60
+PREDATOR_COUNT :: 3
 PREDATOR_ENERGY_DECAY_RATE :: 0.02  // Half the rate of collectors
 AVOIDANCE_DISTANCE :: 50
 FOOD_PULL_SPEED :: 2
@@ -32,6 +33,16 @@ HAZARD_COUNT :: 3
 EVOLUTION_THRESHOLD :: 50
 MAX_CELLS :: 1000
 GOLDEN_FOOD_SPAWN_INTERVAL :: 100
+INITIAL_PREDATOR_ENERGY :: 80
+PING_INTERVAL :: 2.0  // seconds
+PING_SPEED :: 3.0
+MAX_PING_RADIUS :: 100.0
+PING_COOLDOWN :: 1.0  // seconds
+
+// Constants for hook behavior
+HOOK_SPEED :: 2.0
+HOOK_MAX_LENGTH :: 50.0
+HOOK_COOLDOWN :: 60 // frames
 
 
 DEBUG_MODE :: #config(DEBUG, false) // run with  -  -  odin run . -define:DEBUG=true
@@ -82,6 +93,14 @@ Cell :: struct {
     energy: f32,
     behavior_seed: int,
     evolution_trait: EvolutionTrait,
+    is_hooking: bool,
+    hook_target: ^Cell,
+    hook_position: rl.Vector2,
+    hook_length: f32,
+    hook_max_length: f32,
+    is_pinging: bool,
+    ping_radius: f32,
+    ping_cooldown: f32,
 }
 
 Hazard :: struct {
@@ -254,6 +273,28 @@ draw_cell :: proc(cell: Cell) {
     
     draw_evolution_trait(cell, cell.center)
     draw_energy_counter(cell, cell.center)
+
+    if cell.type == .Predator && cell.is_hooking {
+        rl.DrawLineEx(cell.center, cell.hook_position, 2, rl.RED)
+        rl.DrawCircleV(cell.hook_position, 5, rl.RED)
+    }
+
+    if cell.type == .Predator && cell.is_pinging {
+        ping_color := rl.ColorAlpha(rl.RED, 0.5 - (cell.ping_radius / MAX_PING_RADIUS) * 0.5)
+        rl.DrawCircleLines(i32(cell.center.x), i32(cell.center.y), f32(cell.ping_radius), ping_color)
+        
+        // Add a small circle at the center for better visibility
+        rl.DrawCircleV(cell.center, 3, rl.RED)
+        
+        // Add radial lines for a more dynamic look
+        num_lines := 8
+        for i in 0..<num_lines {
+            angle := f32(i) * (2 * math.PI / f32(num_lines))
+            end_x := cell.center.x + math.cos_f32(angle) * cell.ping_radius
+            end_y := cell.center.y + math.sin_f32(angle) * cell.ping_radius
+            rl.DrawLineEx(cell.center, {end_x, end_y}, 1, ping_color)
+        }
+    }
 }
 
 draw_cells :: proc() {
@@ -374,6 +415,7 @@ check_cell_count_change :: proc() {
 }
 
 create_cell :: proc(type: CellType) -> Cell {
+    energy := type == .Predator ? INITIAL_PREDATOR_ENERGY : MAX_ENERGY
     return Cell{
         type = type,
         center = {f32(rand.int31_max(SCREEN_WIDTH)), f32(rand.int31_max(SCREEN_HEIGHT))},
@@ -387,6 +429,14 @@ create_cell :: proc(type: CellType) -> Cell {
         energy = MAX_ENERGY,
         behavior_seed = int(rand.int31()),
         evolution_trait = .None,
+        is_hooking = false,
+        hook_target = nil,
+        hook_position = {0, 0},
+        hook_length = 0,
+        hook_max_length = HOOK_MAX_LENGTH,
+        is_pinging = false,
+        ping_radius = 0,
+        ping_cooldown = 0,
     }
 }
 
@@ -430,11 +480,17 @@ update_cell :: proc(cell: ^Cell) {
         return  // Cell will be removed in the update_game procedure
     }
 
-
     // Check for evolution
     if cell.energy >= EVOLUTION_THRESHOLD && cell.evolution_trait == .None {
         evolve_cell(cell)
     }
+
+
+    if cell.type == .Predator {
+        update_predator_ping(cell, 1.0 / 60.0)
+        update_hook(cell)
+    }
+
 
     // Adjust size based on energy
     cell.target_size = MIN_CELL_SIZE + (MAX_CELL_SIZE - MIN_CELL_SIZE) * (cell.energy / MAX_ENERGY)
@@ -469,14 +525,66 @@ update_cell :: proc(cell: ^Cell) {
 }
 
 update_cell_movement :: proc(cell: ^Cell, move_speed: f32) {
-    if cell.move_timer == 0 {
-        // Choose new random direction
-        angle := rand.float32_range(0, 2 * math.PI)
-        cell.move_direction = {math.cos_f32(angle), math.sin_f32(angle)}
-        cell.move_direction *= move_speed * (1 + 0.2 * math.sin_f32(f32(cell.behavior_seed)))
+    if cell.type == .Predator {
+        nearest_collector: ^Cell = nil
+        min_distance := f32(math.F32_MAX)
+        for &other in cells {
+            if other.type == .Collector {
+                diff := other.center - cell.center
+                // Adjust diff for wrap-around
+                if abs(diff.x) > SCREEN_WIDTH / 2 {
+                    diff.x = -sign(diff.x) * (SCREEN_WIDTH - abs(diff.x))
+                }
+                if abs(diff.y) > SCREEN_HEIGHT / 2 {
+                    diff.y = -sign(diff.y) * (SCREEN_HEIGHT - abs(diff.y))
+                }
+                dist := rl.Vector2Length(diff)
+                if dist < min_distance {
+                    min_distance = dist
+                    nearest_collector = &other
+                }
+            }
+        }
+        if nearest_collector != nil {
+            direction := nearest_collector.center - cell.center
+            // Adjust direction for wrap-around
+            if abs(direction.x) > SCREEN_WIDTH / 2 {
+                direction.x = -sign(direction.x) * (SCREEN_WIDTH - abs(direction.x))
+            }
+            if abs(direction.y) > SCREEN_HEIGHT / 2 {
+                direction.y = -sign(direction.y) * (SCREEN_HEIGHT - abs(direction.y))
+            }
+            
+            // Check if the predator should start hooking
+            if !cell.is_hooking && min_distance <= cell.hook_max_length {
+                cell.is_hooking = true
+                cell.hook_target = nearest_collector
+                cell.hook_position = cell.center
+                cell.hook_length = 0
+            }
+            
+            if !cell.is_hooking {
+                cell.move_direction = rl.Vector2Normalize(direction) * move_speed * 1.5 // Move 50% faster towards collector
+            } else {
+                // If hooking, move slower
+                cell.move_direction = rl.Vector2Normalize(direction) * move_speed * 0.5
+            }
+        } else {
+            // Choose new random direction if no collector is found
+            angle := rand.float32_range(0, 2 * math.PI)
+            cell.move_direction = {math.cos_f32(angle), math.sin_f32(angle)}
+            cell.move_direction *= move_speed
+        }
+    } else {
+        // Existing movement code for collectors
+        if cell.move_timer == 0 {
+            angle := rand.float32_range(0, 2 * math.PI)
+            cell.move_direction = {math.cos_f32(angle), math.sin_f32(angle)}
+            cell.move_direction *= move_speed * (1 + 0.2 * math.sin_f32(f32(cell.behavior_seed)))
+        }
     }
 
-    // Avoid other cells or chase them if predator
+    // Avoid other cells
     for &other in cells {
         if &other != cell {
             diff := cell.center - other.center
@@ -489,14 +597,8 @@ update_cell_movement :: proc(cell: ^Cell, move_speed: f32) {
             }
             dist := rl.Vector2Length(diff)
             if dist < AVOIDANCE_DISTANCE {
-                if cell.type == .Predator && other.type == .Collector {
-                    // Chase collector
-                    cell.move_direction = -diff * move_speed / dist
-                } else {
-                    // Avoid
-                    avoidance := diff * move_speed / dist
-                    cell.move_direction += avoidance
-                }
+                avoidance := diff * move_speed / dist
+                cell.move_direction += avoidance
             }
         }
     }
@@ -525,6 +627,60 @@ update_cell_movement :: proc(cell: ^Cell, move_speed: f32) {
         cell.is_scanning = cell.type == .Collector  // Only collectors scan
         cell.scan_timer = 0
         cell.scan_angle = -90
+    }
+}
+
+update_hook :: proc(cell: ^Cell) {
+    if !cell.is_hooking do return
+
+    direction := cell.hook_target.center - cell.center
+    // Adjust direction for wrap-around
+    if abs(direction.x) > SCREEN_WIDTH / 2 {
+        direction.x = -sign(direction.x) * (SCREEN_WIDTH - abs(direction.x))
+    }
+    if abs(direction.y) > SCREEN_HEIGHT / 2 {
+        direction.y = -sign(direction.y) * (SCREEN_HEIGHT - abs(direction.y))
+    }
+    normalized_direction := rl.Vector2Normalize(direction)
+
+    cell.hook_position += normalized_direction * HOOK_SPEED
+    cell.hook_length += HOOK_SPEED
+
+    if cell.hook_length >= cell.hook_max_length {
+        cell.is_hooking = false
+        cell.hook_target = nil
+        return
+    }
+
+    if rl.CheckCollisionCircles(cell.hook_position, 5, cell.hook_target.center, cell.hook_target.size / 2) {
+        // Hook connected, pull the collector
+        cell.hook_target.center = linalg.lerp(cell.hook_target.center, cell.center, 0.1)
+        if rl.CheckCollisionCircles(cell.center, cell.size / 2, cell.hook_target.center, cell.hook_target.size / 2) {
+            // Collector caught, trigger eating behavior
+            handle_predator_eating(cell)
+            cell.is_hooking = false
+            cell.hook_target = nil
+        }
+    }
+}
+
+update_predator_ping :: proc(cell: ^Cell, dt: f32) {
+    if cell.type != .Predator do return
+
+    cell.ping_cooldown -= dt
+
+    if cell.ping_cooldown <= 0 {
+        cell.is_pinging = true
+        cell.ping_radius = 0
+        cell.ping_cooldown = PING_INTERVAL
+    }
+
+    if cell.is_pinging {
+        cell.ping_radius += PING_SPEED
+        if cell.ping_radius > MAX_PING_RADIUS {
+            cell.is_pinging = false
+            cell.ping_radius = 0
+        }
     }
 }
 
@@ -653,7 +809,7 @@ handle_predator_eating :: proc(cell: ^Cell) {
                 new_predator.center = cell.center
                 new_predator.size = cell.size
                 new_predator.energy = 100  
-                
+
                 cell.energy *= 1.25 //boost energy  
                 
                 append(&cells, new_predator)
