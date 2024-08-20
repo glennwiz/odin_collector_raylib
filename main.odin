@@ -9,7 +9,7 @@ import rl "vendor:raylib"
 
 // Constants
 COLLECTOR_COUNT :: 8
-PREDATOR_COUNT :: 4
+PREDATOR_COUNT :: 8
 
 FPS :: 60
 SCREEN_WIDTH  :: 800
@@ -39,10 +39,18 @@ PING_SPEED :: 3.0
 MAX_PING_RADIUS :: 100.0
 PING_COOLDOWN :: 0.1  // seconds
 
+// reproduction constants
+PREDATOR_REPRODUCTION_THRESHOLD :: 90.0
+PARENT_ENERGY_AFTER_REPRODUCTION :: 50.0
+OFFSPRING_INITIAL_ENERGY :: 30.0
+
 // drain constants
-PREDATOR_DRAIN_TIMER :: 1  // seconds
+PREDATOR_DRAIN_TIMER :: 3  // seconds
 DRAIN_THICKNES :: 1
 DRAIN_DOT_SIZE :: 2
+RAINBOW_SPEED :: 0.05
+DRAIN_BALL_COUNT :: 5
+RAINBOW_CYCLE_SPEED :: 0.02
 
 // scan constants
 SCAN_DURATION :: 60
@@ -60,7 +68,7 @@ SHIELD_PULSE_SPEED :: 1.0
 HOOK_SPEED :: 2.0
 HOOK_MAX_LENGTH :: 50.0
 HOOK_COOLDOWN :: 60 // frames
-ENERGY_DRAIN_RATE :: 0.6 // Amount of energy drained per frame
+ENERGY_DRAIN_RATE :: 5.0 // Amount of energy drained per frame
 
 DEBUG_MODE :: #config(DEBUG, false) // run with  -  -  odin run . -define:DEBUG=true
 DEBUG_FPS :: 10
@@ -124,6 +132,7 @@ Cell :: struct {
     pulse_radius: f32,
     is_draining: bool,
     drain_timer: int,
+    draining_predator: ^Cell,
 }
 
 Hazard :: struct {
@@ -146,6 +155,14 @@ food_tier_properties := [FoodTier]struct{color: rl.Color, energy: f32, spawn_cha
     .Medium_High = {rl.ORANGE, 40, 0.08},
     .High        = {rl.PURPLE, 50, 0.02},
     .Golden      = {rl.GOLD, 200, 0.005},
+}
+
+rainbow_colors := [DRAIN_BALL_COUNT]rl.Color{
+    rl.BLUE,
+    rl.GREEN,
+    rl.YELLOW,
+    rl.ORANGE,
+    rl.RED,
 }
 
 main :: proc() {
@@ -209,6 +226,13 @@ initialize_hazards :: proc() {
     }
 }
 
+get_rainbow_color :: proc(t: f32) -> rl.Color {
+    r := math.sin_f32(t) * 0.5 + 0.5
+    g := math.sin_f32(t + 2.0944) * 0.5 + 0.5 // 2.0944 radians = 120 degrees
+    b := math.sin_f32(t + 4.1888) * 0.5 + 0.5 // 4.1888 radians = 240 degrees
+    return rl.ColorAlpha({u8(r * 255), u8(g * 255), u8(b * 255), 255}, 0.8)
+}
+
 update_game :: proc() {
     frame_count += 1
 
@@ -255,8 +279,6 @@ collect_debug_info :: proc() {
     
     collector_count, predator_count := count_cell_types()
     append(&debug_info, fmt.tprintf("Collectors: %d, Predators: %d", collector_count, predator_count))
-    
-    // Add more debug info as needed
 }
 
 draw_game :: proc() {
@@ -299,31 +321,52 @@ draw_cell :: proc(cell: Cell) {
     draw_evolution_trait(cell, cell.center)
     draw_energy_counter(cell, cell.center)
 
-    if cell.type == .Predator && cell.is_hooking {
-        rl.DrawLineEx(cell.center, cell.hook_position, 2, rl.RED)
-        rl.DrawCircleV(cell.hook_position, 5, rl.RED)
-    }
-
-    //Draw drain effect
-    if cell.type == .Collector && cell.is_draining {
-        for &predator in cells {
-            if predator.type == .Predator {
-                drain_color := rl.ColorAlpha(rl.YELLOW, 0.5 + 0.5 * math.sin_f32(f32(frame_count) * 0.2))
-                rl.DrawLineEx(cell.center, predator.center, DRAIN_THICKNES, drain_color)
-                
-                // Draw energy particles
-                direction := rl.Vector2Normalize(cell.center - predator.center)
-                for i := 0; i < 5; i += 1 {
-                    t := f32(frame_count % FPS) / f32(FPS)
-                    particle_pos := rl.Vector2Lerp(predator.center, cell.center, t + f32(i) * 0.2)
-                    rl.DrawCircleV(particle_pos, DRAIN_DOT_SIZE, rl.YELLOW)
-                }
+    if cell.type == .Predator {
+        if cell.is_hooking {
+            rl.DrawLineEx(cell.center, cell.hook_position, 2, rl.RED)
+            rl.DrawCircleV(cell.hook_position, 5, rl.RED)
+        }        
+        
+        if cell.is_pinging {
+            ping_color := rl.ColorAlpha(rl.RED, 0.5 - (cell.ping_radius / MAX_PING_RADIUS) * 0.5)
+            rl.DrawCircleLines(i32(cell.center.x), i32(cell.center.y), f32(cell.ping_radius), ping_color)
+            
+            // Add a small circle at the center for better visibility
+            rl.DrawCircleV(cell.center, 3, rl.RED)
+            
+            // Add radial lines for a more dynamic look
+            num_lines := 8
+            for i in 0..<num_lines {
+                angle := f32(i) * (2 * math.PI / f32(num_lines))
+                end_x := cell.center.x + math.cos_f32(angle) * cell.ping_radius
+                end_y := cell.center.y + math.sin_f32(angle) * cell.ping_radius
+                rl.DrawLineEx(cell.center, {end_x, end_y}, 1, ping_color)
             }
         }
     }
 
+    // Draw drain effect
+    if cell.type == .Collector && cell.is_draining && cell.draining_predator != nil {
+        // Draw pulsating white line
+        pulse_factor := 0.5 + 0.5 * math.sin_f32(f32(frame_count) * 0.2)
+        line_color := rl.ColorAlpha(rl.WHITE, pulse_factor)
+        rl.DrawLineEx(cell.center, cell.draining_predator.center, DRAIN_THICKNES, line_color)
+       
+        // Draw energy particles
+        direction := rl.Vector2Normalize(cell.center - cell.draining_predator.center)
+        for i in 0..<DRAIN_BALL_COUNT {
+            t := f32(frame_count % FPS) / f32(FPS)
+            particle_pos := linalg.lerp(cell.draining_predator.center, cell.center, t + f32(i) * 0.2)
+            
+            // Calculate the color index, cycling through the rainbow colors
+            color_index := (i + int(f32(frame_count) * RAINBOW_CYCLE_SPEED)) % DRAIN_BALL_COUNT
+            particle_color := rainbow_colors[color_index]
+            
+            rl.DrawCircleV(particle_pos, DRAIN_DOT_SIZE, particle_color)
+        }
+    }
 
-    // Purple pulsing shield visualization
+    // Purple pulsing shield visualization for collectors
     if cell.type == .Collector {
         shield_radius := cell.size * 0.75
         pulse_factor := 0.2 * (1 + math.sin_f32(f32(frame_count) * SHIELD_PULSE_SPEED))
@@ -365,7 +408,7 @@ draw_cells :: proc() {
 draw_debug_overlay :: proc() {
     debug_text_size :: 15
     line_spacing :: 5
-    start_y := 40  // Start below the existing debug info
+    start_y := 40 
 
     for info, i in debug_info {
         y_pos := start_y + i * (debug_text_size + line_spacing)
@@ -509,6 +552,7 @@ create_cell :: proc(type: CellType) -> Cell {
         pulse_radius = 0,
         is_draining = false,
         drain_timer = 0,
+        draining_predator = nil,
     }
 }
 
@@ -524,7 +568,7 @@ adjust_overlapping_cells :: proc() {
             if distance < cell1.size / 2 + cell2.size / 2 {
                 // Cells are overlapping, move them apart
                 overlap := (cell1.size / 2 + cell2.size / 2 - distance) / 2
-                movement := rl.Vector2Scale(rl.Vector2Normalize(diff), overlap)
+                movement := rl.Vector2Normalize(diff) * overlap
                 
                 cell1.center = wrap_position(cell1.center + movement)
                 cell2.center = wrap_position(cell2.center - movement)
@@ -582,6 +626,30 @@ update_cell :: proc(cell: ^Cell) {
     if cell.type == .Predator {
         update_predator_ping(cell, 1.0 / 60.0)
         update_hook(cell)
+        
+        if cell.energy >= PREDATOR_REPRODUCTION_THRESHOLD {
+            new_predator := create_cell(.Predator)
+            
+            // Add a random offset to the new predator's position
+            offset := rl.Vector2{
+                rand.float32_range(-cell.size, cell.size),
+                rand.float32_range(-cell.size, cell.size),
+            }
+            new_predator.center = wrap_position(cell.center + offset)
+            
+            new_predator.size = cell.size
+            
+            // Set fixed energy values for parent and offspring
+            cell.energy = PARENT_ENERGY_AFTER_REPRODUCTION
+            new_predator.energy = OFFSPRING_INITIAL_ENERGY
+            
+            append(&cells, new_predator)
+            fmt.printf("DEBUG: New predator spawned. Parent energy: %.2f, Offspring energy: %.2f\n", 
+                       cell.energy, new_predator.energy)
+            fmt.printf("New predator spawned. Total cells: %d\n", len(cells))
+        }        
+
+        fmt.printf("DEBUG: Predator energy: %.2f\n", cell.energy)
     }
 
 
@@ -600,8 +668,26 @@ update_cell :: proc(cell: ^Cell) {
         handle_cell_reproduction(cell)
     }
 
+    if cell.is_draining {
+        if cell.drain_timer > 0 {
+            cell.drain_timer -= 1
+            if cell.drain_timer % FPS == 0 && cell.draining_predator != nil {  // Every second
+                energy_drain := min(1, cell.draining_predator.energy)
+                cell.draining_predator.energy -= energy_drain
+                cell.energy += energy_drain
+                
+                // Clamp energies
+                cell.draining_predator.energy = max(0, cell.draining_predator.energy)
+                cell.energy = min(MAX_ENERGY, cell.energy)
+            }
+        } else {
+            cell.is_draining = false
+            cell.draining_predator = nil
+        }
+    }
+
     if cell.type == .Collector {
-        update_collector_pulse(cell, 1.0 / 60.0)  // Assuming 60 FPS
+        update_collector_pulse(cell, 1.0 / FPS) 
         
         // Activate pulse if hooked and cooldown is ready
         if cell.can_pulse && cell.pulse_cooldown <= 0 {
@@ -614,7 +700,7 @@ update_cell :: proc(cell: ^Cell) {
             }
         }
 
-        // Manual activation for testing (remove this in the final version)
+        // TODO: Manual activation for testing (remove this in the final version)
         if rl.IsKeyPressed(.SPACE) && cell.pulse_cooldown <= 0 {
             cell.is_pulsing = true
             cell.pulse_radius = 0
@@ -694,7 +780,6 @@ update_cell_movement :: proc(cell: ^Cell, move_speed: f32) {
             cell.move_direction *= move_speed
         }
     } else {
-        // Existing movement code for collectors
         if cell.move_timer == 0 {
             angle := rand.float32_range(0, 2 * math.PI)
             cell.move_direction = {math.cos_f32(angle), math.sin_f32(angle)}
@@ -792,50 +877,33 @@ update_hook :: proc(cell: ^Cell) {
             cell.energy = clamp(cell.energy, 0, MAX_ENERGY)
             cell.hook_target.energy = clamp(cell.hook_target.energy, 0, MAX_ENERGY)
             
-            // Start energy drain effect
+            // Set the draining predator and start energy drain effect
+            cell.hook_target.draining_predator = cell
             cell.hook_target.is_draining = true
-            cell.hook_target.drain_timer = PREDATOR_DRAIN_TIMER * FPS  // 3 seconds at 60 FPS
+            cell.hook_target.drain_timer = PREDATOR_DRAIN_TIMER * FPS
             
             // Break the hook connection
             cell.is_hooking = false
             cell.hook_target = nil
-            return
-        }
-
-        
-        // Check if the collector is pulsing
-        if cell.hook_target.is_pulsing {
-            // Calculate pulse force
-            pulse_force := PULSE_FORCE * (1 - cell.hook_target.pulse_radius / MAX_PULSE_RADIUS)
-            pulse_direction := rl.Vector2Normalize(cell.center - cell.hook_target.center)
+        } else {
+            // Normal energy drain if not pulsing
+            energy_drained := min(ENERGY_DRAIN_RATE, cell.hook_target.energy)
+            cell.hook_target.energy -= energy_drained
+            cell.energy += energy_drained
             
-            // Apply pulse force to predator
-            cell.center += pulse_direction * pulse_force
-            
-            // Break the hook connection
-            cell.is_hooking = false
-            cell.hook_target = nil
-            return
-        }
+            // Ensure energy levels stay within bounds
+            cell.energy = min(cell.energy, MAX_ENERGY)
+            cell.hook_target.energy = max(cell.hook_target.energy, 0)
 
-        // Drain energy from collector to predator
-        energy_drained := min(ENERGY_DRAIN_RATE, cell.hook_target.energy)
-        cell.hook_target.energy -= energy_drained
-        cell.energy += energy_drained
-        
-        // Ensure energy levels stay within bounds
-        cell.energy = min(cell.energy, MAX_ENERGY)
-        cell.hook_target.energy = max(cell.hook_target.energy, 0)
-
-        if rl.CheckCollisionCircles(cell.center, cell.size / 2, cell.hook_target.center, cell.hook_target.size / 2) {
-            // Collector caught, trigger eating behavior
-            handle_predator_eating(cell)
-            cell.is_hooking = false
-            cell.hook_target = nil
+            if rl.CheckCollisionCircles(cell.center, cell.size / 2, cell.hook_target.center, cell.hook_target.size / 2) {
+                // Collector caught, trigger eating behavior
+                handle_predator_eating(cell)
+                cell.is_hooking = false
+                cell.hook_target = nil
+            }
         }
     }
 }
-
 update_predator_ping :: proc(cell: ^Cell, dt: f32) {
     if cell.type != .Predator do return
 
@@ -930,8 +998,8 @@ update_food :: proc(food: ^FoodCell) {
             {food.target_collector.center.x - food.target_collector.size/2,
                 food.target_collector.center.y - food.target_collector.size/2,
                 food.target_collector.size,
-                food.target_collector.size}
-        ) {
+                food.target_collector.size}) 
+        {
             energy_gain: f32
             if food.tier == .Golden {
                 energy_gain = 200  // Golden food gives 200 energy
@@ -990,32 +1058,19 @@ handle_predator_eating :: proc(cell: ^Cell) {
         if other.type == .Collector && rl.CheckCollisionCircles(cell.center, cell.size/2, other.center, other.size/2) {
             energy_gained := other.energy * 0.75  
             cell.energy += energy_gained
-            if cell.energy > MAX_ENERGY do cell.energy = MAX_ENERGY
+            
+            fmt.printf("DEBUG: Predator eating collector. Initial energy: %.2f, Energy gained: %.2f\n", 
+                       cell.energy - energy_gained, energy_gained)
+            
+            if cell.energy > MAX_ENERGY {
+                cell.energy = MAX_ENERGY
+                fmt.printf("DEBUG: Predator energy capped at MAX_ENERGY: %.2f\n", cell.energy)
+            }
             
             // Remove the eaten collector
             ordered_remove(&cells, i)
             
-            // Spawn a new predator only if energy is high enough
-            if cell.energy > MAX_ENERGY * 0.75 {
-                new_predator := create_cell(.Predator)
-                
-                // Add a random offset to the new predator's position
-                offset := rl.Vector2{
-                    rand.float32_range(-cell.size, cell.size),
-                    rand.float32_range(-cell.size, cell.size),
-                }
-                new_predator.center = wrap_position(cell.center + offset)
-                
-                new_predator.size = cell.size
-                new_predator.energy = 100  
-
-                cell.energy *= 1.25 //boost energy  
-                
-                append(&cells, new_predator)
-                fmt.printf("Collector eaten. New predator spawned. Total cells: %d\n", len(cells))
-            } else {
-                fmt.printf("Collector eaten. Predator energy increased. Total cells: %d\n", len(cells))
-            }
+            fmt.printf("Collector eaten. Predator energy increased. Total cells: %d\n", len(cells))
             break // Only eat one collector per update
         } else {
             i += 1
