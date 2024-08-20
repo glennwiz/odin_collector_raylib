@@ -9,8 +9,9 @@ import rl "vendor:raylib"
 
 // Constants
 COLLECTOR_COUNT :: 8
-PREDATOR_COUNT :: 1
+PREDATOR_COUNT :: 4
 
+FPS :: 60
 SCREEN_WIDTH  :: 800
 SCREEN_HEIGHT :: 450
 SQUARE_SIZE   :: 5
@@ -20,8 +21,6 @@ FOOD_COUNT    :: 30
 INITIAL_FOOD_SIZE :: 5
 GROWTH_AMOUNT :: 0.15
 MOVE_DURATION :: 40
-SCAN_DURATION :: 60
-SCAN_ANGLE    :: 180
 PREDATOR_ENERGY_DECAY_RATE :: 0.02 
 AVOIDANCE_DISTANCE :: 50
 FOOD_PULL_SPEED :: 2
@@ -40,13 +39,28 @@ PING_SPEED :: 3.0
 MAX_PING_RADIUS :: 100.0
 PING_COOLDOWN :: 0.1  // seconds
 
+// drain constants
+PREDATOR_DRAIN_TIMER :: 1  // seconds
+DRAIN_THICKNES :: 1
+DRAIN_DOT_SIZE :: 2
 
+// scan constants
+SCAN_DURATION :: 60
+SCAN_ANGLE    :: 180
 
-// Constants for hook behavior
+// Pulse constants
+PULSE_COOLDOWN :: 5.0  // seconds
+PULSE_DURATION :: 0.5  // seconds
+PULSE_SPEED :: 100.0   // units per second
+MAX_PULSE_RADIUS :: 30.0
+PULSE_FORCE :: 10.0
+SHIELD_PULSE_SPEED :: 1.0 
+
+// Hook constants
 HOOK_SPEED :: 2.0
 HOOK_MAX_LENGTH :: 50.0
 HOOK_COOLDOWN :: 60 // frames
-ENERGY_DRAIN_RATE :: 0.5 // Amount of energy drained per frame
+ENERGY_DRAIN_RATE :: 0.6 // Amount of energy drained per frame
 
 DEBUG_MODE :: #config(DEBUG, false) // run with  -  -  odin run . -define:DEBUG=true
 DEBUG_FPS :: 10
@@ -104,6 +118,12 @@ Cell :: struct {
     is_pinging: bool,
     ping_radius: f32,
     ping_cooldown: f32,
+    can_pulse: bool,
+    pulse_cooldown: f32,
+    is_pulsing: bool,
+    pulse_radius: f32,
+    is_draining: bool,
+    drain_timer: int,
 }
 
 Hazard :: struct {
@@ -284,20 +304,54 @@ draw_cell :: proc(cell: Cell) {
         rl.DrawCircleV(cell.hook_position, 5, rl.RED)
     }
 
-    if cell.type == .Predator && cell.is_pinging {
-        ping_color := rl.ColorAlpha(rl.RED, 0.5 - (cell.ping_radius / MAX_PING_RADIUS) * 0.5)
-        rl.DrawCircleLines(i32(cell.center.x), i32(cell.center.y), f32(cell.ping_radius), ping_color)
+    //Draw drain effect
+    if cell.type == .Collector && cell.is_draining {
+        for &predator in cells {
+            if predator.type == .Predator {
+                drain_color := rl.ColorAlpha(rl.YELLOW, 0.5 + 0.5 * math.sin_f32(f32(frame_count) * 0.2))
+                rl.DrawLineEx(cell.center, predator.center, DRAIN_THICKNES, drain_color)
+                
+                // Draw energy particles
+                direction := rl.Vector2Normalize(cell.center - predator.center)
+                for i := 0; i < 5; i += 1 {
+                    t := f32(frame_count % FPS) / f32(FPS)
+                    particle_pos := rl.Vector2Lerp(predator.center, cell.center, t + f32(i) * 0.2)
+                    rl.DrawCircleV(particle_pos, DRAIN_DOT_SIZE, rl.YELLOW)
+                }
+            }
+        }
+    }
+
+
+    // Purple pulsing shield visualization
+    if cell.type == .Collector {
+        shield_radius := cell.size * 0.75
+        pulse_factor := 0.2 * (1 + math.sin_f32(f32(frame_count) * SHIELD_PULSE_SPEED))
         
-        // Add a small circle at the center for better visibility
-        rl.DrawCircleV(cell.center, 3, rl.RED)
+        if cell.is_pulsing {
+            // Expand the shield when pulsing
+            shield_radius = linalg.lerp(shield_radius, MAX_PULSE_RADIUS, cell.pulse_radius / MAX_PULSE_RADIUS)
+            pulse_factor *= 2  // Increase the pulse intensity when active
+        }
         
-        // Add radial lines for a more dynamic look
-        num_lines := 8
-        for i in 0..<num_lines {
-            angle := f32(i) * (2 * math.PI / f32(num_lines))
-            end_x := cell.center.x + math.cos_f32(angle) * cell.ping_radius
-            end_y := cell.center.y + math.sin_f32(angle) * cell.ping_radius
-            rl.DrawLineEx(cell.center, {end_x, end_y}, 1, ping_color)
+        shield_color := rl.ColorAlpha(rl.PURPLE, 0.3 + pulse_factor)
+        rl.DrawCircleV(cell.center, shield_radius, shield_color)
+        
+        // Draw shield border
+        border_color := rl.ColorAlpha(rl.PURPLE, 0.7 + pulse_factor)
+        rl.DrawCircleLines(i32(cell.center.x), i32(cell.center.y), shield_radius, border_color)
+        
+        // Add some "energy sparks" around the shield
+        if cell.is_pulsing {
+            for i := 0; i < 8; i += 1 {
+                angle := f32(i) * (2 * math.PI / 8) + f32(frame_count) * 0.1
+                spark_distance := shield_radius * (0.9 + 0.2 * math.sin_f32(angle * 3))
+                spark_pos := rl.Vector2{
+                    cell.center.x + math.cos_f32(angle) * spark_distance,
+                    cell.center.y + math.sin_f32(angle) * spark_distance,
+                }
+                rl.DrawCircleV(spark_pos, 2, rl.PURPLE)
+            }
         }
     }
 }
@@ -449,6 +503,12 @@ create_cell :: proc(type: CellType) -> Cell {
         is_pinging = false,
         ping_radius = 0,
         ping_cooldown = 0,
+        can_pulse = type == .Collector,
+        pulse_cooldown = 0,
+        is_pulsing = false,
+        pulse_radius = 0,
+        is_draining = false,
+        drain_timer = 0,
     }
 }
 
@@ -538,6 +598,27 @@ update_cell :: proc(cell: ^Cell) {
         }
 
         handle_cell_reproduction(cell)
+    }
+
+    if cell.type == .Collector {
+        update_collector_pulse(cell, 1.0 / 60.0)  // Assuming 60 FPS
+        
+        // Activate pulse if hooked and cooldown is ready
+        if cell.can_pulse && cell.pulse_cooldown <= 0 {
+            for &predator in cells {
+                if predator.type == .Predator && predator.is_hooking && predator.hook_target == cell {
+                    cell.is_pulsing = true
+                    cell.pulse_radius = 0
+                    break
+                }
+            }
+        }
+
+        // Manual activation for testing (remove this in the final version)
+        if rl.IsKeyPressed(.SPACE) && cell.pulse_cooldown <= 0 {
+            cell.is_pulsing = true
+            cell.pulse_radius = 0
+        }
     }
 
     if DEBUG_MODE {
@@ -692,7 +773,51 @@ update_hook :: proc(cell: ^Cell) {
     if rl.CheckCollisionCircles(cell.hook_position, 5, cell.hook_target.center, cell.hook_target.size / 2) {
         // Hook connected, pull the collector and drain energy
         cell.hook_target.center = linalg.lerp(cell.hook_target.center, cell.center, 0.1)
+
+        // Check if the collector is pulsing
+        if cell.hook_target.is_pulsing {
+            // Calculate pulse force
+            pulse_force := PULSE_FORCE * (1 - cell.hook_target.pulse_radius / MAX_PULSE_RADIUS)
+            pulse_direction := rl.Vector2Normalize(cell.center - cell.hook_target.center)
+            
+            // Apply pulse force to predator
+            cell.center += pulse_direction * pulse_force
+            
+            // Transfer 50% of predator's energy to collector
+            energy_transfer := cell.energy * 0.5
+            cell.energy -= energy_transfer
+            cell.hook_target.energy += energy_transfer
+            
+            // Clamp energies to valid range
+            cell.energy = clamp(cell.energy, 0, MAX_ENERGY)
+            cell.hook_target.energy = clamp(cell.hook_target.energy, 0, MAX_ENERGY)
+            
+            // Start energy drain effect
+            cell.hook_target.is_draining = true
+            cell.hook_target.drain_timer = PREDATOR_DRAIN_TIMER * FPS  // 3 seconds at 60 FPS
+            
+            // Break the hook connection
+            cell.is_hooking = false
+            cell.hook_target = nil
+            return
+        }
+
         
+        // Check if the collector is pulsing
+        if cell.hook_target.is_pulsing {
+            // Calculate pulse force
+            pulse_force := PULSE_FORCE * (1 - cell.hook_target.pulse_radius / MAX_PULSE_RADIUS)
+            pulse_direction := rl.Vector2Normalize(cell.center - cell.hook_target.center)
+            
+            // Apply pulse force to predator
+            cell.center += pulse_direction * pulse_force
+            
+            // Break the hook connection
+            cell.is_hooking = false
+            cell.hook_target = nil
+            return
+        }
+
         // Drain energy from collector to predator
         energy_drained := min(ENERGY_DRAIN_RATE, cell.hook_target.energy)
         cell.hook_target.energy -= energy_drained
@@ -746,6 +871,26 @@ wrap_position :: proc(position: rl.Vector2) -> rl.Vector2 {
     }
     
     return wrapped
+}
+
+update_collector_pulse :: proc(cell: ^Cell, dt: f32) {
+    if cell.type != .Collector do return
+
+    if cell.pulse_cooldown > 0 {
+        cell.pulse_cooldown -= dt
+        if cell.pulse_cooldown < 0 {
+            cell.pulse_cooldown = 0
+        }
+    }
+
+    if cell.is_pulsing {
+        cell.pulse_radius += PULSE_SPEED * dt
+        if cell.pulse_radius > MAX_PULSE_RADIUS {
+            cell.is_pulsing = false
+            cell.pulse_radius = 0
+            cell.pulse_cooldown = PULSE_COOLDOWN
+        }
+    }
 }
 
 update_cell_scanning :: proc(cell: ^Cell) {
