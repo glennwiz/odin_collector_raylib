@@ -8,6 +8,9 @@ import "core:time"
 import rl "vendor:raylib"
 
 // Constants
+COLLECTOR_COUNT :: 8
+PREDATOR_COUNT :: 1
+
 SCREEN_WIDTH  :: 800
 SCREEN_HEIGHT :: 450
 SQUARE_SIZE   :: 5
@@ -19,8 +22,6 @@ GROWTH_AMOUNT :: 0.15
 MOVE_DURATION :: 40
 SCAN_DURATION :: 60
 SCAN_ANGLE    :: 180
-COLLECTOR_COUNT :: 10
-PREDATOR_COUNT :: 3
 PREDATOR_ENERGY_DECAY_RATE :: 0.02 
 AVOIDANCE_DISTANCE :: 50
 FOOD_PULL_SPEED :: 2
@@ -39,11 +40,13 @@ PING_SPEED :: 3.0
 MAX_PING_RADIUS :: 100.0
 PING_COOLDOWN :: 0.1  // seconds
 
+
+
 // Constants for hook behavior
 HOOK_SPEED :: 2.0
 HOOK_MAX_LENGTH :: 50.0
 HOOK_COOLDOWN :: 60 // frames
-
+ENERGY_DRAIN_RATE :: 0.5 // Amount of energy drained per frame
 
 DEBUG_MODE :: #config(DEBUG, false) // run with  -  -  odin run . -define:DEBUG=true
 DEBUG_FPS :: 10
@@ -558,6 +561,7 @@ update_cell_movement :: proc(cell: ^Cell, move_speed: f32) {
     if cell.type == .Predator {
         nearest_collector: ^Cell = nil
         min_distance := f32(math.F32_MAX)
+        
         for &other in cells {
             if other.type == .Collector {
                 diff := other.center - cell.center
@@ -569,12 +573,15 @@ update_cell_movement :: proc(cell: ^Cell, move_speed: f32) {
                     diff.y = -sign(diff.y) * (SCREEN_HEIGHT - abs(diff.y))
                 }
                 dist := rl.Vector2Length(diff)
-                if dist < min_distance {
+                
+                // Only consider collectors within the ping radius
+                if dist < min_distance && dist <= MAX_PING_RADIUS {
                     min_distance = dist
                     nearest_collector = &other
                 }
             }
         }
+
         if nearest_collector != nil {
             direction := nearest_collector.center - cell.center
             // Adjust direction for wrap-around
@@ -600,7 +607,7 @@ update_cell_movement :: proc(cell: ^Cell, move_speed: f32) {
                 cell.move_direction = rl.Vector2Normalize(direction) * move_speed * 0.5
             }
         } else {
-            // Choose new random direction if no collector is found
+            // Choose new random direction if no collector is found within ping radius
             angle := rand.float32_range(0, 2 * math.PI)
             cell.move_direction = {math.cos_f32(angle), math.sin_f32(angle)}
             cell.move_direction *= move_speed
@@ -683,8 +690,18 @@ update_hook :: proc(cell: ^Cell) {
     }
 
     if rl.CheckCollisionCircles(cell.hook_position, 5, cell.hook_target.center, cell.hook_target.size / 2) {
-        // Hook connected, pull the collector
+        // Hook connected, pull the collector and drain energy
         cell.hook_target.center = linalg.lerp(cell.hook_target.center, cell.center, 0.1)
+        
+        // Drain energy from collector to predator
+        energy_drained := min(ENERGY_DRAIN_RATE, cell.hook_target.energy)
+        cell.hook_target.energy -= energy_drained
+        cell.energy += energy_drained
+        
+        // Ensure energy levels stay within bounds
+        cell.energy = min(cell.energy, MAX_ENERGY)
+        cell.hook_target.energy = max(cell.hook_target.energy, 0)
+
         if rl.CheckCollisionCircles(cell.center, cell.size / 2, cell.hook_target.center, cell.hook_target.size / 2) {
             // Collector caught, trigger eating behavior
             handle_predator_eating(cell)
@@ -709,7 +726,7 @@ update_predator_ping :: proc(cell: ^Cell, dt: f32) {
         cell.ping_radius += PING_SPEED
         if cell.ping_radius > MAX_PING_RADIUS {
             cell.is_pinging = false
-            cell.ping_radius = 0
+            cell.ping_radius = MAX_PING_RADIUS
         }
     }
 }
